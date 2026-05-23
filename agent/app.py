@@ -33,8 +33,42 @@ LLM_URL = os.getenv("LLM_URL", "http://127.0.0.1:8070")
 KIWIX_URL = os.getenv("KIWIX_URL", "http://localhost:3000")
 ZIM_DIR = os.getenv("ZIM_DIR", "/library/zims/content")
 MODEL_DIR = os.getenv("MODEL_DIR", "/home/drichards13/iiab-agent/models")
-MAX_CONTEXT_CHARS = 3000  # smaller context = faster inference
-MAX_SEARCH_RESULTS = 3
+MAX_CONTEXT_CHARS = 3000
+MAX_SEARCH_RESULTS = 5  # fetch more, then rank by trust
+
+# --- Source Trust Tiers ---
+# Tier 1: Peer-reviewed textbooks, academic content (indisputable facts)
+# Tier 2: Curated encyclopedias (reliable, community-vetted)
+# Tier 3: Literature, technical reference, community Q&A
+SOURCE_TIERS = {
+    # Tier 1 — Academic / Textbook (highest trust)
+    "libretexts": {"tier": 1, "label": "Textbook", "icon": "\U0001F4D7"},
+    "k12": {"tier": 1, "label": "Textbook", "icon": "\U0001F4D7"},
+    # Tier 2 — Encyclopedia (vetted, broad)
+    "wikipedia": {"tier": 2, "label": "Encyclopedia", "icon": "\U0001F4D6"},
+    "wikinews": {"tier": 2, "label": "News Archive", "icon": "\U0001F4F0"},
+    "wikiversity": {"tier": 2, "label": "University", "icon": "\U0001F393"},
+    "wikivoyage": {"tier": 2, "label": "Travel Guide", "icon": "\U0001F30D"},
+    "wikiquote": {"tier": 2, "label": "Quotations", "icon": "\U0001F4AC"},
+    "ifixit": {"tier": 2, "label": "Repair Guide", "icon": "\U0001F527"},
+    # Tier 3 — Reference / Community / Literature
+    "gutenberg": {"tier": 3, "label": "Literature", "icon": "\U0001F4DA"},
+    "stackoverflow": {"tier": 3, "label": "Community Q&A", "icon": "\U0001F4AC"},
+    "serverfault": {"tier": 3, "label": "Community Q&A", "icon": "\U0001F4AC"},
+    "superuser": {"tier": 3, "label": "Community Q&A", "icon": "\U0001F4AC"},
+    "askubuntu": {"tier": 3, "label": "Community Q&A", "icon": "\U0001F4AC"},
+    "devdocs": {"tier": 3, "label": "Dev Reference", "icon": "\U0001F4BB"},
+}
+DEFAULT_TIER = {"tier": 3, "label": "Reference", "icon": "\U0001F4C4"}
+
+
+def classify_source(path: str) -> dict:
+    """Determine trust tier from a Kiwix content path."""
+    path_lower = path.lower()
+    for key, info in SOURCE_TIERS.items():
+        if key in path_lower:
+            return info
+    return DEFAULT_TIER
 
 # --- Voice engines (loaded at startup) ---
 piper_voice = None
@@ -73,34 +107,40 @@ app = FastAPI(title="IIAB Knowledge Agent v2", lifespan=lifespan)
 
 
 # --- LLM System Prompts ---
+# These prompts enforce that the LLM is a faithful reader, not an authority.
+# The source text IS the authority. The LLM translates it for the learner.
 PROMPTS = {
     "ask": (
-        "You are a knowledgeable assistant on an offline educational device.\n"
-        "Answer using ONLY the provided reference text. Be concise and accurate.\n"
-        "End with 1-2 follow-up questions the user might find interesting.\n"
-        "If the text doesn't answer the question, say so honestly and suggest what to search for instead.\n"
-        "Cite your sources by name."
+        "You are Khumi, an educational assistant on an offline device.\n"
+        "You MUST answer using ONLY the provided reference text. Do NOT use any other knowledge.\n"
+        "Sources marked [Textbook] are peer-reviewed academic content — treat these as the most reliable.\n"
+        "Sources marked [Encyclopedia] are broadly reliable.\n"
+        "Sources marked [Literature] or [Community Q&A] are supplementary — do not present opinions as facts.\n"
+        "Be concise and accurate. Cite which source you used by name.\n"
+        "If the text does not answer the question, say: 'I don't have a good source for this yet.'\n"
+        "End with one follow-up question the learner might explore."
     ),
     "teach": (
-        "You are a warm, patient teacher on a local device in a remote community.\n"
-        "You teach using ONLY the provided reference text - never invent facts.\n"
+        "You are Khumi, a warm and patient teacher on an offline device in a remote community.\n"
+        "You MUST teach using ONLY the provided reference text — never invent facts.\n"
+        "Prefer sources marked [Textbook] over all others — these are academically verified.\n"
         "Create a structured mini-lesson:\n"
         "1. HOOK: One curious sentence to spark interest\n"
-        "2. KEY CONCEPTS: 3-5 clear bullet points\n"
+        "2. KEY CONCEPTS: 3-5 clear bullet points from the text\n"
         "3. REAL EXAMPLE: Something relatable from daily life\n"
         "4. SUMMARY: 2 sentences capturing the core idea\n"
-        "5. DID YOU KNOW?: One surprising fact from the text\n"
-        "Use simple, clear language. If the text doesn't cover the topic well, say:\n"
-        "\"I don't have enough information on this yet - try asking about a related topic.\"\n"
-        "Always cite which source you used."
+        "Use simple, clear language. Always cite which source you used.\n"
+        "If the text doesn't cover the topic well, say:\n"
+        "'I don't have enough information on this yet — try asking about a related topic.'"
     ),
     "quiz": (
         "Generate exactly 3 multiple-choice questions from the reference text.\n"
+        "Only create questions where the answer is clearly stated in the text.\n"
         "For each question, provide:\n"
         "- A clear question\n"
         "- 4 answer options (A, B, C, D)\n"
         "- The correct answer letter\n"
-        "- A brief, encouraging explanation\n"
+        "- A brief, encouraging explanation citing the source\n"
         'Return ONLY valid JSON array:\n'
         '[{"q":"...","options":["A. ...","B. ...","C. ...","D. ..."],"answer":"A","why":"..."}]'
     ),
@@ -425,7 +465,10 @@ async function doAsk(mode){
       const icon=mode==='teach'?'&#x1F4D6; Lesson':mode==='quiz'?'&#x2753; Quiz':'&#x1F4AC; Answer';
       let h='<div class="answer-box"><h3>'+icon+' <button class="btn-speak" onclick="speakText(this.closest(\'.answer-box\').querySelector(\'.at\').textContent)" title="Read aloud">&#x1F50A;</button></h3><div class="at">'+esc(d.answer)+'</div></div>';
       if(d.sources&&d.sources.length){h+='<div class="sources"><h4>Sources</h4>';
-        d.sources.forEach(s=>{h+='<a class="source-link" href="'+s.url+'" target="_blank">&#x1F4C4; '+esc(s.title)+' <span style="color:var(--text2)">- '+esc(s.book)+'</span></a>';});h+='</div>';}
+        d.sources.forEach(s=>{
+          const tc=s.tier===1?'var(--sage)':s.tier===2?'var(--teal)':'var(--text2)';
+          const badge='<span style="color:'+tc+';font-size:.75em;font-weight:600;">'+(s.tier_icon||'')+' '+(s.tier_label||'')+'</span>';
+          h+='<a class="source-link" href="'+s.url+'" target="_blank">'+(s.tier_icon||'\u{1F4C4}')+' '+esc(s.title)+' '+badge+'</a>';});h+='</div>';}
       if(d.search_ms!==undefined)h+='<div class="status">Searched '+( d.zim_count||'?')+' knowledge bases in '+(d.search_ms/1000).toFixed(1)+'s &middot; Generated in '+(d.llm_ms/1000).toFixed(1)+'s</div>';
       rd.innerHTML=h;if(autoRead&&d.answer)speakText(d.answer);}
   }catch(e){rd.innerHTML='<div class="answer-box" style="border-color:var(--coral)">Connection error: '+e.message+'</div>';setCompanion('');}
@@ -617,13 +660,30 @@ async def ask_endpoint(request: Request):
             results.extend(await search_kiwix(kw))
         search_ms = (time.time() - t0) * 1000
 
+    # Classify and sort results by trust tier (Tier 1 first)
+    for r in results:
+        tier_info = classify_source(r["path"])
+        r["tier"] = tier_info["tier"]
+        r["tier_label"] = tier_info["label"]
+        r["tier_icon"] = tier_info["icon"]
+    results.sort(key=lambda r: r["tier"])
+
+    # Fetch articles, preferring higher-trust sources
     context_parts = []
     sources = []
-    for r in results[:MAX_SEARCH_RESULTS]:
+    for r in results[:4]:  # top 4 after sorting by trust
         text, book = await fetch_article(r["path"])
         if text:
-            context_parts.append(f"[Source: {r['title']}]\n{text}\n")
-            sources.append({"title": r["title"], "url": r["path"], "book": book})
+            tag = r["tier_label"]
+            context_parts.append(f"[Source: {r['title']}] [{tag}]\n{text}\n")
+            sources.append({
+                "title": r["title"],
+                "url": r["path"],
+                "book": book,
+                "tier": r["tier"],
+                "tier_label": r["tier_label"],
+                "tier_icon": r["tier_icon"],
+            })
 
     context = "\n---\n".join(context_parts)
     if not context:
