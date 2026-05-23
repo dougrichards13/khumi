@@ -1,0 +1,18 @@
+[Unit]
+Description=Khumi LLM — llama.cpp inference server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/home/drichards13/llama.cpp/build/bin/llama-server \
+    --model /home/drichards13/iiab-agent/models/qwen2.5-0.5b-instruct-q4_k_m.gguf \
+    --host 127.0.0.1 --port 8070 \
+    --threads 4 --ctx-size 1024 \
+    --n-predict 256
+Restart=on-failure
+RestartSec=5
+User=drichards13
+Environment=OMP_NUM_THREADS=4
+
+[Install]
+WantedBy=multi-user.target

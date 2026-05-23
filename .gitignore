@@ -1,0 +1,8 @@
+*.gguf
+*.onnx
+*.onnx.json
+*.pyc
+__pycache__/
+*.egg-info/
+venv/
+.env

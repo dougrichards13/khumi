@@ -1,0 +1,19 @@
+[Unit]
+Description=IIAB Knowledge Agent — Local LLM-powered Q&A
+After=network.target ollama.service kiwix-serve.service
+Wants=ollama.service kiwix-serve.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/drichards13/iiab-agent
+ExecStart=/home/drichards13/iiab-agent/bin/python app.py
+Restart=always
+RestartSec=5
+Environment=OLLAMA_URL=http://localhost:11434
+Environment=OLLAMA_MODEL=phi3:mini
+Environment=KIWIX_URL=http://localhost:3000
+Environment=ZIM_DIR=/library/zims/content
+
+[Install]
+WantedBy=multi-user.target
